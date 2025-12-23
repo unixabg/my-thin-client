@@ -103,22 +103,13 @@ INITRD="$BUILD_DIR/initrd"
 [[ -f "$VMLINUX" ]] || die "Missing required file: $VMLINUX (UEFI boot expects a kernel)"
 [[ -f "$INITRD" ]] || die "Missing required file: $INITRD (UEFI boot expects an initrd)"
 
-# Refuse if this block device is a partition of another disk
-if lsblk -no TYPE "$TARGET" 2>/dev/null | grep -qx "part"; then
-  die "Target appears to be a partition, not a whole disk: $TARGET"
-fi
-
-# Refuse if target contains the currently-mounted root filesystem
-FORCE=0
-# parse --force
-
-if [[ "$FORCE" -ne 1 ]]; then
-  PKNAME="$(lsblk -no PKNAME "$TARGET" 2>/dev/null || true)"
-  if [[ -n "$PKNAME" ]]; then
-    die "Refusing: $TARGET looks like a partition. Use --force to override."
-  fi
+# Refuse if target contains the currently-mounted partitions
+if grep -Fq -- "$TARGET" /proc/mounts; then
+  log "WARNING: partitions from $TARGET are mounted:"
+  grep -F -- "$TARGET" /proc/mounts || true
+  die "Please unmount any mounted partitions on target and run again."
 else
-  log "WARNING: --force used; proceeding even if target looks like a partition."
+  log "Clean: no partitions from $TARGET are currently mounted."
 fi
 
 if [[ "$ASSUME_YES" -ne 1 ]]; then
