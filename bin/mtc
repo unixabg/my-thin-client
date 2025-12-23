@@ -1,0 +1,73 @@
+\
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# shellcheck source=library/common.sh
+source "${ROOT_DIR}/library/common.sh"
+# shellcheck source=library/cleanup.sh
+source "${ROOT_DIR}/library/cleanup.sh"
+# shellcheck source=library/build.sh
+source "${ROOT_DIR}/library/build.sh"
+
+usage() {
+  cat <<EOF
+Usage: sudo ${0##*/} <flavor>
+Example: sudo ${0##*/} debian
+
+Layout:
+  config/<flavor>/config.sh
+  config/<flavor>/chroot/   (rsync into rootfs BEFORE chroot runs)
+  config/<flavor>/output/   (rsync into output AFTER filesystem.squashfs is built)
+EOF
+}
+
+[[ $# -ge 1 ]] || { usage; exit 2; }
+CFG_NAME="$1"
+CFG_DIR="${ROOT_DIR}/config/${CFG_NAME}"
+[[ -d "${CFG_DIR}" ]] || mtc_die "Config folder not found: ${CFG_DIR}"
+[[ -f "${CFG_DIR}/config.sh" ]] || mtc_die "Missing config: ${CFG_DIR}/config.sh"
+
+mtc_require_root
+
+# Load flavor config
+# shellcheck source=/dev/null
+source "${CFG_DIR}/config.sh"
+
+# Defaults (can be overridden by config.sh)
+: "${MTC_ARCH:=amd64}"
+: "${MTC_SUITE:=bookworm}"
+: "${MTC_MIRROR:=http://deb.debian.org/debian}"
+: "${MTC_BUILDS_DIR:=/mnt/data/temp/mtc-builds}"
+: "${MTC_SQUASHFS_COMP:=lz4}"
+: "${MTC_RAMDISK_SIZE:=}"
+: "${CHROOT_SHELL:=0}"
+
+MTC_WORK_DIR="${MTC_BUILDS_DIR}/mtc-${CFG_NAME}-${MTC_ARCH}"
+
+# Ensure we always tear down mounts on exit, even on failure
+cleanup_on_exit() {
+  mtc_teardown_mounts || true
+}
+trap cleanup_on_exit EXIT INT TERM
+
+# Fresh build each time (safe reruns)
+if [[ -d "${MTC_WORK_DIR}" ]]; then
+  mtc_log "Cleaning previous workdir: ${MTC_WORK_DIR}"
+  mtc_cleanup_workdir
+fi
+mkdir -p "${MTC_WORK_DIR}"
+
+mtc_log "Build start: flavor=${CFG_NAME} arch=${MTC_ARCH} suite=${MTC_SUITE}"
+mtc_log "Workdir: ${MTC_WORK_DIR}"
+
+# Run with full log
+{
+  set -x
+  mtc_build_all
+  set +x
+} 2>&1 | tee "${MTC_WORK_DIR}/build.log"
+
+mtc_log "Done :)"

@@ -1,0 +1,51 @@
+# --------------------------------------------------
+# Build artifacts (NEVER commit these)
+# --------------------------------------------------
+
+# SquashFS and boot artifacts
+filesystem.squashfs
+vmlinuz
+initrd
+initramfs*
+*.squashfs
+
+# Build output directories (relative)
+output/
+build/
+work/
+
+# Absolute / common temp paths used by mkSquashfs
+mnt/
+data/
+tmp/
+var/tmp/
+
+# If you hardcode this path anywhere
+mtc-builds/
+
+# --------------------------------------------------
+# Logs
+# --------------------------------------------------
+*.log
+
+# --------------------------------------------------
+# Package artifacts
+# --------------------------------------------------
+*.deb
+*.udeb
+
+# --------------------------------------------------
+# Editor / OS junk
+# --------------------------------------------------
+*~
+*.swp
+*.swo
+*.bak
+.DS_Store
+Thumbs.db
+
+# --------------------------------------------------
+# Shell safety
+# --------------------------------------------------
+.env
+

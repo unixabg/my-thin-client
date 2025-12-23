@@ -1,0 +1,245 @@
+\
+#!/usr/bin/env bash
+# mtc_installer - install an MTC build (filesystem.squashfs + vmlinuz/initrd) to a UEFI (x86_64) device
+set -euo pipefail
+
+if [[ -z "${BASH_VERSION:-}" ]]; then
+  echo "ERROR: This installer must be run with bash." >&2
+  echo "Try: sudo bash $0 --target ... --build ..." >&2
+  exit 1
+fi
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+mtc_installer --target <blockdev> --build <output_dir> [--yes] [--efi-size-mib 512] [--no-bootloader]
+
+Required:
+  --target           Target block device (e.g. /dev/sda, /dev/mmcblk0)  (WILL BE ERASED)
+  --build            Build output directory containing filesystem.squashfs
+
+Optional:
+  --yes              Do not prompt (DANGEROUS)
+  --efi-size-mib N   EFI partition size in MiB (default: 512)
+  --no-bootloader    Skip GRUB install/config (still installs rootfs + fstab)
+
+Build output directory should contain:
+  filesystem.squashfs   (required)
+  vmlinuz               (recommended)
+  initrd                (recommended)
+
+Example:
+  sudo bash mtc_installer --target /dev/mmcblk0 --build /path/to/output --yes
+USAGE
+}
+
+TARGET=""
+BUILD_DIR=""
+ASSUME_YES=0
+EFI_SIZE_MIB=512
+NO_BOOTLOADER=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target) TARGET="${2:-}"; shift 2;;
+    --build)  BUILD_DIR="${2:-}"; shift 2;;
+    --yes) ASSUME_YES=1; shift;;
+    --efi-size-mib) EFI_SIZE_MIB="${2:-}"; shift 2;;
+    --no-bootloader) NO_BOOTLOADER=1; shift;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown argument: $1 (use --help)";;
+  esac
+done
+
+[[ -n "$TARGET" ]] || { usage; die "Missing --target"; }
+[[ -n "$BUILD_DIR" ]] || { usage; die "Missing --build"; }
+
+command -v apt-get >/dev/null 2>&1 || die "This installer expects an apt-based environment (apt-get not found)."
+
+# Install requirements up front (UEFI x86_64 host)
+log "Ensuring installer requirements are present (apt-based host)"
+export DEBIAN_FRONTEND=noninteractive
+apt-get update
+apt-get install -y \
+  util-linux \
+  gdisk \
+  dosfstools \
+  e2fsprogs \
+  squashfs-tools \
+  rsync \
+  grub-efi-amd64-bin \
+  grub-common
+
+# vfat tools may be named mkfs.vfat or mkfs.fat
+if command -v mkfs.vfat >/dev/null 2>&1; then
+  MKFS_VFAT="mkfs.vfat"
+elif command -v mkfs.fat >/dev/null 2>&1; then
+  MKFS_VFAT="mkfs.fat"
+else
+  die "Missing mkfs.vfat (dosfstools)."
+fi
+
+part_path() {
+  local disk="$1" idx="$2"
+  if [[ "$disk" =~ mmcblk|nvme ]]; then
+    echo "${disk}p${idx}"
+  else
+    echo "${disk}${idx}"
+  fi
+}
+
+is_blockdev() { [[ -b "$1" ]]; }
+
+is_blockdev "$TARGET" || die "--target must be a block device: $TARGET"
+[[ -d "$BUILD_DIR" ]] || die "--build is not a directory: $BUILD_DIR"
+
+SQUASH="$BUILD_DIR/filesystem.squashfs"
+VMLINUX="$BUILD_DIR/vmlinuz"
+INITRD="$BUILD_DIR/initrd"
+
+[[ -f "$SQUASH" ]] || die "Missing required file: $SQUASH"
+[[ -f "$VMLINUX" ]] || die "Missing required file: $VMLINUX (UEFI boot expects a kernel)"
+[[ -f "$INITRD" ]] || die "Missing required file: $INITRD (UEFI boot expects an initrd)"
+
+# Refuse if this block device is a partition of another disk
+if lsblk -no TYPE "$TARGET" 2>/dev/null | grep -qx "part"; then
+  die "Target appears to be a partition, not a whole disk: $TARGET"
+fi
+
+# Refuse if target contains the currently-mounted root filesystem
+FORCE=0
+# parse --force
+
+if [[ "$FORCE" -ne 1 ]]; then
+  PKNAME="$(lsblk -no PKNAME "$TARGET" 2>/dev/null || true)"
+  if [[ -n "$PKNAME" ]]; then
+    die "Refusing: $TARGET looks like a partition. Use --force to override."
+  fi
+else
+  log "WARNING: --force used; proceeding even if target looks like a partition."
+fi
+
+if [[ "$ASSUME_YES" -ne 1 ]]; then
+  echo
+  echo "About to ERASE and INSTALL to: $TARGET"
+  lsblk "$TARGET" || true
+  echo
+  read -r -p "Type 'ERASE' to continue: " ans
+  [[ "$ans" == "ERASE" ]] || die "Aborted."
+fi
+
+# Unmount any mounted partitions under the target
+log "Unmounting anything mounted from $TARGET (if any)"
+while read -r mp; do
+  [[ -n "$mp" ]] || continue
+  log "Unmounting $mp"
+  umount -lf "$mp" || true
+done < <(lsblk -nrpo MOUNTPOINT "$TARGET" | awk 'NF' || true)
+
+# Partition the disk (GPT: EFI + Linux)
+log "Partitioning $TARGET (GPT: EFI ${EFI_SIZE_MIB}MiB + ROOT remainder)"
+if command -v wipefs >/dev/null 2>&1; then
+  wipefs -a "$TARGET" || true
+fi
+
+# sgdisk is robust across environments (avoids sfdisk dialect issues)
+sgdisk --zap-all "$TARGET" >/dev/null || true
+sgdisk -n "1:0:+${EFI_SIZE_MIB}M" -t "1:EF00" -c "1:MTCBOOT" "$TARGET" >/dev/null
+sgdisk -n "2:0:0"            -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
+
+# Inform kernel of partition changes
+if command -v partprobe >/dev/null 2>&1; then
+  partprobe "$TARGET" || true
+elif command -v partx >/dev/null 2>&1; then
+  partx -u "$TARGET" || true
+fi
+
+P1="$(part_path "$TARGET" 1)"
+P2="$(part_path "$TARGET" 2)"
+
+for _ in {1..30}; do
+  [[ -b "$P1" && -b "$P2" ]] && break
+  sleep 0.2
+done
+[[ -b "$P1" && -b "$P2" ]] || die "Partitions did not appear: $P1 / $P2"
+
+log "Formatting EFI: $P1 (FAT32) and ROOT: $P2 (ext4)"
+"$MKFS_VFAT" -F 32 -n MTCBOOT "$P1" >/dev/null
+mkfs.ext4 -F -L MTCROOT "$P2" >/dev/null
+
+MNT_ROOT="$(mktemp -d /tmp/mtc-root.XXXXXX)"
+MNT_EFI="$(mktemp -d /tmp/mtc-efi.XXXXXX)"
+
+cleanup() {
+  set +e
+  # Unmount in reverse order
+  mountpoint -q "$MNT_ROOT/boot/efi" && umount -lf "$MNT_ROOT/boot/efi" || true
+  mountpoint -q "$MNT_EFI" && umount -lf "$MNT_EFI" || true
+  mountpoint -q "$MNT_ROOT" && umount -lf "$MNT_ROOT" || true
+  [[ -d "$MNT_EFI" ]] && rmdir "$MNT_EFI" 2>/dev/null || true
+  [[ -d "$MNT_ROOT" ]] && rmdir "$MNT_ROOT" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+log "Mounting partitions"
+mount "$P2" "$MNT_ROOT"
+mkdir -p "$MNT_ROOT/boot/efi"
+mount "$P1" "$MNT_EFI"
+mount --bind "$MNT_EFI" "$MNT_ROOT/boot/efi"
+
+log "Installing root filesystem from $SQUASH"
+unsquashfs -f -d "$MNT_ROOT" "$SQUASH" >/dev/null
+
+log "Installing kernel + initrd into target /boot"
+mkdir -p "$MNT_ROOT/boot"
+cp -f "$VMLINUX" "$MNT_ROOT/boot/vmlinuz"
+cp -f "$INITRD" "$MNT_ROOT/boot/initrd"
+
+ROOT_UUID="$(blkid -s UUID -o value "$P2")"
+EFI_UUID="$(blkid -s UUID -o value "$P1")"
+[[ -n "$ROOT_UUID" ]] || die "Could not read UUID for $P2"
+[[ -n "$EFI_UUID" ]] || die "Could not read UUID for $P1"
+
+log "Writing /etc/fstab"
+mkdir -p "$MNT_ROOT/etc"
+cat > "$MNT_ROOT/etc/fstab" <<EOF
+# /etc/fstab - installed by mtc_installer
+UUID=$ROOT_UUID  /         ext4   defaults,noatime  0 1
+UUID=$EFI_UUID   /boot/efi vfat   umask=0077        0 1
+EOF
+
+if [[ "$NO_BOOTLOADER" -eq 1 ]]; then
+  log "Skipping bootloader install (--no-bootloader)"
+else
+  command -v grub-install >/dev/null 2>&1 || die "grub-install not found (install grub-efi-amd64-bin) or use --no-bootloader"
+  log "Installing UEFI GRUB (fallback /removable mode)"
+  mkdir -p "$MNT_ROOT/boot/grub"
+
+  grub-install \
+    --target=x86_64-efi \
+    --efi-directory="$MNT_EFI" \
+    --boot-directory="$MNT_ROOT/boot" \
+    --removable \
+    --recheck \
+    --no-nvram >/dev/null
+
+  log "Writing minimal GRUB config"
+  cat > "$MNT_ROOT/boot/grub/grub.cfg" <<EOF
+set default=0
+set timeout=3
+
+menuentry "MTC Linux" {
+    insmod part_gpt
+    insmod fat
+    insmod ext2
+    search --no-floppy --fs-uuid --set=root $ROOT_UUID
+    linux /boot/vmlinuz root=UUID=$ROOT_UUID ro quiet
+    initrd /boot/initrd
+}
+EOF
+fi
+
+sync
+log "Install complete. Reboot and choose the installed disk in UEFI boot menu if needed."
