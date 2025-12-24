@@ -56,6 +56,18 @@ PACKAGES=(
   network-manager
   network-manager-gnome
 
+  # Wi-Fi support
+  firmware-linux
+  firmware-linux-nonfree
+  firmware-iwlwifi
+  firmware-realtek
+  firmware-atheros
+  firmware-brcm80211
+  iw
+  wireless-tools
+  wpasupplicant
+  dbus
+
   # Utilities
   gvfs
   gvfs-backends
