@@ -142,6 +142,10 @@ mtc_chroot_provision() {
     rm -f "${pkgfile}"
   fi
 
+  # Ensure initrd includes newly-installed hooks (live-boot, cryptsetup-initramfs, etc.)
+  mtc_log "Regenerating initramfs inside chroot"
+  chroot "${root}" /usr/bin/env bash -lc 'update-initramfs -u'
+
   # optional user-provided setup script inside rootfs overlay
   if [[ -x "${root}/tmp/mtc/setup.sh" ]]; then
     mtc_log "Running /tmp/mtc/setup.sh inside chroot"

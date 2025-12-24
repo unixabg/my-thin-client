@@ -26,6 +26,46 @@ PACKAGES=(
   live-boot
   initramfs-tools
   squashfs-tools
+  cryptsetup
+  cryptsetup-initramfs
+  busybox
+  console-setup
+
+  # Display manager (lightweight)
+  xserver-xorg
+  lightdm
+  lightdm-gtk-greeter
+
+  # XFCE desktop (core + goodies)
+  xfce4
+  xfce4-goodies
+  chromium
+
+  # Terminal + file manager helpers
+  xfce4-terminal
+  thunar-archive-plugin
+  thunar-media-tags-plugin
+
+  # Audio
+  pipewire
+  pipewire-audio
+  wireplumber
+  pavucontrol
+
+  # Networking
+  network-manager
+  network-manager-gnome
+
+  # Utilities
+  gvfs
+  gvfs-backends
+  udisks2
+  polkitd
+  pkexec
+
+  # Fonts
+  fonts-dejavu
+  fonts-liberation
 )
 
 # --- Accounts -------------------------------------------------

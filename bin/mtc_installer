@@ -14,7 +14,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 usage() {
   cat <<'USAGE'
 mtc_installer --mode <stateless|persistence|mutable> --target <blockdev> --build <output_dir>
-              [--yes] [--efi-size-mib 512] [--no-bootloader] [--persistence-size-mib 2048]
+              [--yes] [--efi-size-mib 512] [--no-bootloader] [--persistence-size-mib 2048] [--persistence-luks]
 
 Required:
   --mode             One of: stateless | persistence | mutable
@@ -26,6 +26,7 @@ Optional:
   --efi-size-mib N       EFI partition size in MiB (default: 512)
   --no-bootloader        Skip GRUB install/config
   --persistence-size-mib Size of persistence partition in MiB (default: 2048). Only used for --mode persistence.
+  --persistence-luks     Add luks encryption to persistence partition
 
 Build output directory must contain:
   filesystem.squashfs
@@ -36,7 +37,7 @@ Examples:
   # Stateless (no persistence)
   sudo bash bin/mtc_installer --mode stateless --target /dev/mmcblk0 --build ./output --yes
 
-  # Stateless with persistence partition (writable overlay)
+  # Stateless with persistence overlay
   sudo bash bin/mtc_installer --mode persistence --target /dev/mmcblk0 --build ./output --yes
 
   # Mutable (traditional install)
@@ -51,6 +52,8 @@ ASSUME_YES=0
 EFI_SIZE_MIB=512
 NO_BOOTLOADER=0
 PERSIST_SIZE_MIB=2048
+PERSIST_LUKS=0
+GRUB_LABEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -61,6 +64,7 @@ while [[ $# -gt 0 ]]; do
     --efi-size-mib) EFI_SIZE_MIB="${2:-}"; shift 2;;
     --no-bootloader) NO_BOOTLOADER=1; shift;;
     --persistence-size-mib) PERSIST_SIZE_MIB="${2:-}"; shift 2;;
+    --persistence-luks) PERSIST_LUKS=1; shift;;
     -h|--help) usage; exit 0;;
     *) die "Unknown argument: $1 (use --help)";;
   esac
@@ -98,7 +102,8 @@ apt-get install -y \
   squashfs-tools \
   rsync \
   grub-efi-amd64-bin \
-  grub-common
+  grub-common \
+  cryptsetup
 
 # vfat tools may be named mkfs.vfat or mkfs.fat
 if command -v mkfs.vfat >/dev/null 2>&1; then
@@ -136,8 +141,8 @@ while read -r mp; do
   umount -lf "$mp" || true
 done < <(lsblk -nrpo MOUNTPOINT "$TARGET" 2>/dev/null | awk 'NF' || true)
 
-# Partition the disk (GPT: EFI + ROOT [+ optional PERSISTENCE])
-log "Partitioning $TARGET (GPT: EFI + ROOT carrier [+ optional PERSISTENCE])"
+# Partition the disk (GPT: EFI + ROOT)
+log "Partitioning $TARGET (GPT)"
 if command -v wipefs >/dev/null 2>&1; then
   wipefs -a "$TARGET" || true
 fi
@@ -145,25 +150,15 @@ fi
 # sgdisk is robust across environments (avoids sfdisk dialect issues)
 sgdisk --zap-all "$TARGET" >/dev/null || true
 
-# Determine disk size so we can carve a dedicated persistence partition when requested.
-TOTAL_BYTES="$(blockdev --getsize64 "$TARGET")"
-TOTAL_MIB=$(( TOTAL_BYTES / 1024 / 1024 ))
+# EFI + ROOT carrier (+ PERSIST partition for --mode persistence)
+sgdisk -n "1:0:+${EFI_SIZE_MIB}M" -t "1:EF00" -c "1:MTCBOOT" "$TARGET" >/dev/null
 
 if [[ "$MODE" == "persistence" ]]; then
-  # Layout: [EFI][ROOT carrier][PERSISTENCE]
-  # Leave a small safety margin (8MiB) for alignment/metadata.
-  ROOT_SIZE_MIB=$(( TOTAL_MIB - EFI_SIZE_MIB - PERSIST_SIZE_MIB - 8 ))
-  (( ROOT_SIZE_MIB > 0 )) || die "Target too small: need EFI(${EFI_SIZE_MIB}MiB)+ROOT(>0)+PERSIST(${PERSIST_SIZE_MIB}MiB)"
-
-  log " - EFI: ${EFI_SIZE_MIB}MiB, ROOT carrier: ${ROOT_SIZE_MIB}MiB, PERSISTENCE: ${PERSIST_SIZE_MIB}MiB"
-  sgdisk -n "1:0:+${EFI_SIZE_MIB}M"   -t "1:EF00" -c "1:MTCBOOT"     "$TARGET" >/dev/null
-  sgdisk -n "2:0:+${ROOT_SIZE_MIB}M"  -t "2:8300" -c "2:MTCROOT"     "$TARGET" >/dev/null
-  sgdisk -n "3:0:0"                  -t "3:8300" -c "3:persistence"  "$TARGET" >/dev/null
+  # Partition 2 (ROOT carrier) ends before the persistence partition.
+  sgdisk -n "2:0:-${PERSIST_SIZE_MIB}M" -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
+  sgdisk -n "3:0:0"                 -t "3:8300" -c "3:PERSISTENCE" "$TARGET" >/dev/null
 else
-  # Layout: [EFI][ROOT carrier]
-  log " - EFI: ${EFI_SIZE_MIB}MiB, ROOT carrier: remainder"
-  sgdisk -n "1:0:+${EFI_SIZE_MIB}M" -t "1:EF00" -c "1:MTCBOOT" "$TARGET" >/dev/null
-  sgdisk -n "2:0:0"                -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
+  sgdisk -n "2:0:0"                 -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
 fi
 
 # Inform kernel of partition changes
@@ -180,7 +175,7 @@ if [[ "$MODE" == "persistence" ]]; then
   P3="$(part_path "$TARGET" 3)"
 fi
 
-for _ in {1..60}; do
+for _ in {1..30}; do
   if [[ "$MODE" == "persistence" ]]; then
     [[ -b "$P1" && -b "$P2" && -b "$P3" ]] && break
   else
@@ -188,31 +183,35 @@ for _ in {1..60}; do
   fi
   sleep 0.2
 done
-
 if [[ "$MODE" == "persistence" ]]; then
   [[ -b "$P1" && -b "$P2" && -b "$P3" ]] || die "Partitions did not appear: $P1 / $P2 / $P3"
 else
   [[ -b "$P1" && -b "$P2" ]] || die "Partitions did not appear: $P1 / $P2"
 fi
-if [[ "$MODE" == "persistence" ]]; then
-  log "Formatting EFI: $P1 (FAT32), ROOT carrier: $P2 (ext4), and PERSISTENCE: $P3 (ext4)"
-else
-  log "Formatting EFI: $P1 (FAT32) and ROOT: $P2 (ext4)"
-fi
+
+log "Formatting EFI: $P1 (FAT32) and ROOT: $P2 (ext4)"
 "$MKFS_VFAT" -F 32 -n MTCBOOT "$P1" >/dev/null
 mkfs.ext4 -F -L MTCROOT "$P2" >/dev/null
+
 if [[ "$MODE" == "persistence" ]]; then
-  mkfs.ext4 -F -L persistence "$P3" >/dev/null
+  if [[ "$PERSIST_LUKS" -eq 1 ]]; then
+    log "Formatting PERSISTENCE: $P3 (LUKS + ext4 LABEL=persistence)"
+    cryptsetup luksFormat "$P3"
+    cryptsetup open "$P3" persistence_crypt
+    mkfs.ext4 -F -L persistence /dev/mapper/persistence_crypt >/dev/null
+    cryptsetup close persistence_crypt
+  else
+    log "Formatting PERSISTENCE: $P3 (ext4 LABEL=persistence)"
+    mkfs.ext4 -F -L persistence "$P3" >/dev/null
+  fi
 fi
 
 MNT_ROOT="$(mktemp -d /tmp/mtc-root.XXXXXX)"
 MNT_EFI="$(mktemp -d /tmp/mtc-efi.XXXXXX)"
-PERSIST_MNT=""
 
 cleanup() {
   set +e
   # Unmount in reverse order
-  [[ -n "$PERSIST_MNT" ]] && mountpoint -q "$PERSIST_MNT" && umount -lf "$PERSIST_MNT" || true
   mountpoint -q "$MNT_ROOT/boot/efi" && umount -lf "$MNT_ROOT/boot/efi" || true
   mountpoint -q "$MNT_EFI" && umount -lf "$MNT_EFI" || true
   mountpoint -q "$MNT_ROOT" && umount -lf "$MNT_ROOT" || true
@@ -261,12 +260,19 @@ UUID=$EFI_UUID   /boot/efi vfat   umask=0077        0 1
 EOF
 fi
 
-# Persistence mode: use a dedicated persistence partition (label: persistence)
+# Persistence mode: create a persistence partition (optionally LUKS) and write persistence.conf
 # This provides a writable overlay for / across reboots (Debian live-boot persistence).
 if [[ "$MODE" == "persistence" ]]; then
-  log "Initializing persistence partition on $P3 (size: ${PERSIST_SIZE_MIB}MiB)"
   PERSIST_MNT="$(mktemp -d /tmp/mtc-persist.XXXXXX)"
-  mount "$P3" "$PERSIST_MNT"
+
+  if [[ "$PERSIST_LUKS" -eq 1 ]]; then
+    log "Setting up encrypted persistence partition (LUKS prompt at boot)"
+    cryptsetup open "$P3" persistence_crypt
+    mount "/dev/mapper/persistence_crypt" "$PERSIST_MNT"
+  else
+    log "Setting up persistence partition"
+    mount "$P3" "$PERSIST_MNT"
+  fi
 
   # Persist the whole root via overlay
   cat > "$PERSIST_MNT/persistence.conf" <<EOF
@@ -275,10 +281,13 @@ EOF
 
   sync
   umount -lf "$PERSIST_MNT" || true
-  rmdir "$PERSIST_MNT" 2>/dev/null || true
-  PERSIST_MNT=""
 
-  log "Persistence partition initialized (LABEL=persistence)"
+  if [[ "$PERSIST_LUKS" -eq 1 ]]; then
+    cryptsetup close persistence_crypt || true
+  fi
+
+  rmdir "$PERSIST_MNT" 2>/dev/null || true
+  log "Persistence partition ready (LABEL=persistence)"
 fi
 
 # Bootloader
@@ -298,18 +307,31 @@ else
     --no-nvram >/dev/null
 
   log "Writing GRUB config"
+
+  GRUB_LABEL="$MODE"
   KARGS="quiet"
+
   case "$MODE" in
-    mutable)      KARGS="root=UUID=$ROOT_UUID ro " ;;
-    stateless)    KARGS="boot=live " ;;
-    persistence)  KARGS="boot=live persistence persistence-label=persistence persistence-storage=filesystem " ;;
+    mutable)
+      KARGS="root=UUID=$ROOT_UUID ro "
+      ;;
+    stateless)
+      KARGS="boot=live "
+      ;;
+    persistence)
+      KARGS="boot=live persistence persistence-label=persistence persistence-storage=filesystem "
+      if [[ "$PERSIST_LUKS" -eq 1 ]]; then
+        KARGS+="persistence-encryption=luks "
+        GRUB_LABEL+=" with luks encryption "
+      fi
+      ;;
   esac
 
   cat > "$MNT_ROOT/boot/grub/grub.cfg" <<EOF
 set default=0
 set timeout=3
 
-menuentry "MTC Linux ($MODE)" {
+menuentry "MTC Linux ($GRUB_LABEL)" {
     insmod part_gpt
     insmod fat
     insmod ext2
