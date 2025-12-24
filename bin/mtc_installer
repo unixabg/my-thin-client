@@ -1,11 +1,10 @@
-\
 #!/usr/bin/env bash
 # mtc_installer - install an MTC build (filesystem.squashfs + vmlinuz/initrd) to a UEFI (x86_64) device
 set -euo pipefail
 
 if [[ -z "${BASH_VERSION:-}" ]]; then
-  echo "ERROR: This installer must be run with bash." >&2
-  echo "Try: sudo bash $0 --target ... --build ..." >&2
+  echo "ERROR: This installer must be run with bash" >&2
+  echo "Try: sudo bash $0 --mode <stateless|persistence|mutable> --target ... --build ..." >&2
   exit 1
 fi
 
@@ -14,51 +13,80 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 usage() {
   cat <<'USAGE'
-mtc_installer --target <blockdev> --build <output_dir> [--yes] [--efi-size-mib 512] [--no-bootloader]
+mtc_installer --mode <stateless|persistence|mutable> --target <blockdev> --build <output_dir>
+              [--yes] [--efi-size-mib 512] [--no-bootloader] [--persistence-size-mib 2048]
 
 Required:
+  --mode             One of: stateless | persistence | mutable
   --target           Target block device (e.g. /dev/sda, /dev/mmcblk0)  (WILL BE ERASED)
-  --build            Build output directory containing filesystem.squashfs
+  --build            Build output directory containing filesystem.squashfs, vmlinuz, initrd
 
 Optional:
-  --yes              Do not prompt (DANGEROUS)
-  --efi-size-mib N   EFI partition size in MiB (default: 512)
-  --no-bootloader    Skip GRUB install/config (still installs rootfs + fstab)
+  --yes                  Do not prompt (DANGEROUS)
+  --efi-size-mib N       EFI partition size in MiB (default: 512)
+  --no-bootloader        Skip GRUB install/config
+  --persistence-size-mib Size of persistence partition in MiB (default: 2048). Only used for --mode persistence.
 
-Build output directory should contain:
-  filesystem.squashfs   (required)
-  vmlinuz               (recommended)
-  initrd                (recommended)
+Build output directory must contain:
+  filesystem.squashfs
+  vmlinuz
+  initrd
 
-Example:
-  sudo bash mtc_installer --target /dev/mmcblk0 --build /path/to/output --yes
+Examples:
+  # Stateless (no persistence)
+  sudo bash bin/mtc_installer --mode stateless --target /dev/mmcblk0 --build ./output --yes
+
+  # Stateless with persistence partition (writable overlay)
+  sudo bash bin/mtc_installer --mode persistence --target /dev/mmcblk0 --build ./output --yes
+
+  # Mutable (traditional install)
+  sudo bash bin/mtc_installer --mode mutable --target /dev/mmcblk0 --build ./output --yes
 USAGE
 }
 
 TARGET=""
 BUILD_DIR=""
+MODE=""
 ASSUME_YES=0
 EFI_SIZE_MIB=512
 NO_BOOTLOADER=0
+PERSIST_SIZE_MIB=2048
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode) MODE="${2:-}"; shift 2;;
     --target) TARGET="${2:-}"; shift 2;;
     --build)  BUILD_DIR="${2:-}"; shift 2;;
     --yes) ASSUME_YES=1; shift;;
     --efi-size-mib) EFI_SIZE_MIB="${2:-}"; shift 2;;
     --no-bootloader) NO_BOOTLOADER=1; shift;;
+    --persistence-size-mib) PERSIST_SIZE_MIB="${2:-}"; shift 2;;
     -h|--help) usage; exit 0;;
     *) die "Unknown argument: $1 (use --help)";;
   esac
 done
 
+[[ -n "$MODE" ]] || { usage; die "Missing required --mode"; }
+case "$MODE" in
+  stateless|persistence|mutable) ;;
+  *) usage; die "Invalid --mode '$MODE' (must be: stateless|persistence|mutable)";;
+esac
+
 [[ -n "$TARGET" ]] || { usage; die "Missing --target"; }
 [[ -n "$BUILD_DIR" ]] || { usage; die "Missing --build"; }
 
+[[ -b "$TARGET" ]] || die "--target must be a block device: $TARGET"
+[[ -d "$BUILD_DIR" ]] || die "--build is not a directory: $BUILD_DIR"
+
+SQUASH="$BUILD_DIR/filesystem.squashfs"
+VMLINUX="$BUILD_DIR/vmlinuz"
+INITRD="$BUILD_DIR/initrd"
+[[ -f "$SQUASH" ]] || die "Missing required file: $SQUASH"
+[[ -f "$VMLINUX" ]] || die "Missing required file: $VMLINUX"
+[[ -f "$INITRD" ]] || die "Missing required file: $INITRD"
+
 command -v apt-get >/dev/null 2>&1 || die "This installer expects an apt-based environment (apt-get not found)."
 
-# Install requirements up front (UEFI x86_64 host)
 log "Ensuring installer requirements are present (apt-based host)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -90,30 +118,9 @@ part_path() {
   fi
 }
 
-is_blockdev() { [[ -b "$1" ]]; }
-
-is_blockdev "$TARGET" || die "--target must be a block device: $TARGET"
-[[ -d "$BUILD_DIR" ]] || die "--build is not a directory: $BUILD_DIR"
-
-SQUASH="$BUILD_DIR/filesystem.squashfs"
-VMLINUX="$BUILD_DIR/vmlinuz"
-INITRD="$BUILD_DIR/initrd"
-
-[[ -f "$SQUASH" ]] || die "Missing required file: $SQUASH"
-[[ -f "$VMLINUX" ]] || die "Missing required file: $VMLINUX (UEFI boot expects a kernel)"
-[[ -f "$INITRD" ]] || die "Missing required file: $INITRD (UEFI boot expects an initrd)"
-
-# Refuse if target contains the currently-mounted partitions
-if grep -Fq -- "$TARGET" /proc/mounts; then
-  log "WARNING: partitions from $TARGET are mounted:"
-  grep -F -- "$TARGET" /proc/mounts || true
-  die "Please unmount any mounted partitions on target and run again."
-else
-  log "Clean: no partitions from $TARGET are currently mounted."
-fi
-
 if [[ "$ASSUME_YES" -ne 1 ]]; then
   echo
+  echo "Mode: $MODE"
   echo "About to ERASE and INSTALL to: $TARGET"
   lsblk "$TARGET" || true
   echo
@@ -121,24 +128,43 @@ if [[ "$ASSUME_YES" -ne 1 ]]; then
   [[ "$ans" == "ERASE" ]] || die "Aborted."
 fi
 
-# Unmount any mounted partitions under the target
+# Unmount anything mounted from the target (best effort)
 log "Unmounting anything mounted from $TARGET (if any)"
 while read -r mp; do
   [[ -n "$mp" ]] || continue
   log "Unmounting $mp"
   umount -lf "$mp" || true
-done < <(lsblk -nrpo MOUNTPOINT "$TARGET" | awk 'NF' || true)
+done < <(lsblk -nrpo MOUNTPOINT "$TARGET" 2>/dev/null | awk 'NF' || true)
 
-# Partition the disk (GPT: EFI + Linux)
-log "Partitioning $TARGET (GPT: EFI ${EFI_SIZE_MIB}MiB + ROOT remainder)"
+# Partition the disk (GPT: EFI + ROOT [+ optional PERSISTENCE])
+log "Partitioning $TARGET (GPT: EFI + ROOT carrier [+ optional PERSISTENCE])"
 if command -v wipefs >/dev/null 2>&1; then
   wipefs -a "$TARGET" || true
 fi
 
 # sgdisk is robust across environments (avoids sfdisk dialect issues)
 sgdisk --zap-all "$TARGET" >/dev/null || true
-sgdisk -n "1:0:+${EFI_SIZE_MIB}M" -t "1:EF00" -c "1:MTCBOOT" "$TARGET" >/dev/null
-sgdisk -n "2:0:0"            -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
+
+# Determine disk size so we can carve a dedicated persistence partition when requested.
+TOTAL_BYTES="$(blockdev --getsize64 "$TARGET")"
+TOTAL_MIB=$(( TOTAL_BYTES / 1024 / 1024 ))
+
+if [[ "$MODE" == "persistence" ]]; then
+  # Layout: [EFI][ROOT carrier][PERSISTENCE]
+  # Leave a small safety margin (8MiB) for alignment/metadata.
+  ROOT_SIZE_MIB=$(( TOTAL_MIB - EFI_SIZE_MIB - PERSIST_SIZE_MIB - 8 ))
+  (( ROOT_SIZE_MIB > 0 )) || die "Target too small: need EFI(${EFI_SIZE_MIB}MiB)+ROOT(>0)+PERSIST(${PERSIST_SIZE_MIB}MiB)"
+
+  log " - EFI: ${EFI_SIZE_MIB}MiB, ROOT carrier: ${ROOT_SIZE_MIB}MiB, PERSISTENCE: ${PERSIST_SIZE_MIB}MiB"
+  sgdisk -n "1:0:+${EFI_SIZE_MIB}M"   -t "1:EF00" -c "1:MTCBOOT"     "$TARGET" >/dev/null
+  sgdisk -n "2:0:+${ROOT_SIZE_MIB}M"  -t "2:8300" -c "2:MTCROOT"     "$TARGET" >/dev/null
+  sgdisk -n "3:0:0"                  -t "3:8300" -c "3:persistence"  "$TARGET" >/dev/null
+else
+  # Layout: [EFI][ROOT carrier]
+  log " - EFI: ${EFI_SIZE_MIB}MiB, ROOT carrier: remainder"
+  sgdisk -n "1:0:+${EFI_SIZE_MIB}M" -t "1:EF00" -c "1:MTCBOOT" "$TARGET" >/dev/null
+  sgdisk -n "2:0:0"                -t "2:8300" -c "2:MTCROOT" "$TARGET" >/dev/null
+fi
 
 # Inform kernel of partition changes
 if command -v partprobe >/dev/null 2>&1; then
@@ -149,23 +175,44 @@ fi
 
 P1="$(part_path "$TARGET" 1)"
 P2="$(part_path "$TARGET" 2)"
+P3=""
+if [[ "$MODE" == "persistence" ]]; then
+  P3="$(part_path "$TARGET" 3)"
+fi
 
-for _ in {1..30}; do
-  [[ -b "$P1" && -b "$P2" ]] && break
+for _ in {1..60}; do
+  if [[ "$MODE" == "persistence" ]]; then
+    [[ -b "$P1" && -b "$P2" && -b "$P3" ]] && break
+  else
+    [[ -b "$P1" && -b "$P2" ]] && break
+  fi
   sleep 0.2
 done
-[[ -b "$P1" && -b "$P2" ]] || die "Partitions did not appear: $P1 / $P2"
 
-log "Formatting EFI: $P1 (FAT32) and ROOT: $P2 (ext4)"
+if [[ "$MODE" == "persistence" ]]; then
+  [[ -b "$P1" && -b "$P2" && -b "$P3" ]] || die "Partitions did not appear: $P1 / $P2 / $P3"
+else
+  [[ -b "$P1" && -b "$P2" ]] || die "Partitions did not appear: $P1 / $P2"
+fi
+if [[ "$MODE" == "persistence" ]]; then
+  log "Formatting EFI: $P1 (FAT32), ROOT carrier: $P2 (ext4), and PERSISTENCE: $P3 (ext4)"
+else
+  log "Formatting EFI: $P1 (FAT32) and ROOT: $P2 (ext4)"
+fi
 "$MKFS_VFAT" -F 32 -n MTCBOOT "$P1" >/dev/null
 mkfs.ext4 -F -L MTCROOT "$P2" >/dev/null
+if [[ "$MODE" == "persistence" ]]; then
+  mkfs.ext4 -F -L persistence "$P3" >/dev/null
+fi
 
 MNT_ROOT="$(mktemp -d /tmp/mtc-root.XXXXXX)"
 MNT_EFI="$(mktemp -d /tmp/mtc-efi.XXXXXX)"
+PERSIST_MNT=""
 
 cleanup() {
   set +e
   # Unmount in reverse order
+  [[ -n "$PERSIST_MNT" ]] && mountpoint -q "$PERSIST_MNT" && umount -lf "$PERSIST_MNT" || true
   mountpoint -q "$MNT_ROOT/boot/efi" && umount -lf "$MNT_ROOT/boot/efi" || true
   mountpoint -q "$MNT_EFI" && umount -lf "$MNT_EFI" || true
   mountpoint -q "$MNT_ROOT" && umount -lf "$MNT_ROOT" || true
@@ -180,8 +227,18 @@ mkdir -p "$MNT_ROOT/boot/efi"
 mount "$P1" "$MNT_EFI"
 mount --bind "$MNT_EFI" "$MNT_ROOT/boot/efi"
 
-log "Installing root filesystem from $SQUASH"
-unsquashfs -f -d "$MNT_ROOT" "$SQUASH" >/dev/null
+# Install according to mode
+case "$MODE" in
+  mutable)
+    log "Installing mutable root filesystem (unsquashfs to ext4 /)"
+    unsquashfs -f -d "$MNT_ROOT" "$SQUASH" >/dev/null
+    ;;
+  stateless|persistence)
+    log "Installing stateless squashfs to /live/filesystem.squashfs"
+    mkdir -p "$MNT_ROOT/live"
+    cp -f "$SQUASH" "$MNT_ROOT/live/filesystem.squashfs"
+    ;;
+esac
 
 log "Installing kernel + initrd into target /boot"
 mkdir -p "$MNT_ROOT/boot"
@@ -193,14 +250,38 @@ EFI_UUID="$(blkid -s UUID -o value "$P1")"
 [[ -n "$ROOT_UUID" ]] || die "Could not read UUID for $P2"
 [[ -n "$EFI_UUID" ]] || die "Could not read UUID for $P1"
 
-log "Writing /etc/fstab"
-mkdir -p "$MNT_ROOT/etc"
-cat > "$MNT_ROOT/etc/fstab" <<EOF
-# /etc/fstab - installed by mtc_installer
+# Only write fstab for mutable installs (stateless root is not the ext4 carrier)
+if [[ "$MODE" == "mutable" ]]; then
+  log "Writing /etc/fstab (mutable mode)"
+  mkdir -p "$MNT_ROOT/etc"
+  cat > "$MNT_ROOT/etc/fstab" <<EOF
+# /etc/fstab - installed by mtc_installer (mutable)
 UUID=$ROOT_UUID  /         ext4   defaults,noatime  0 1
 UUID=$EFI_UUID   /boot/efi vfat   umask=0077        0 1
 EOF
+fi
 
+# Persistence mode: use a dedicated persistence partition (label: persistence)
+# This provides a writable overlay for / across reboots (Debian live-boot persistence).
+if [[ "$MODE" == "persistence" ]]; then
+  log "Initializing persistence partition on $P3 (size: ${PERSIST_SIZE_MIB}MiB)"
+  PERSIST_MNT="$(mktemp -d /tmp/mtc-persist.XXXXXX)"
+  mount "$P3" "$PERSIST_MNT"
+
+  # Persist the whole root via overlay
+  cat > "$PERSIST_MNT/persistence.conf" <<EOF
+/ union
+EOF
+
+  sync
+  umount -lf "$PERSIST_MNT" || true
+  rmdir "$PERSIST_MNT" 2>/dev/null || true
+  PERSIST_MNT=""
+
+  log "Persistence partition initialized (LABEL=persistence)"
+fi
+
+# Bootloader
 if [[ "$NO_BOOTLOADER" -eq 1 ]]; then
   log "Skipping bootloader install (--no-bootloader)"
 else
@@ -216,17 +297,24 @@ else
     --recheck \
     --no-nvram >/dev/null
 
-  log "Writing minimal GRUB config"
+  log "Writing GRUB config"
+  KARGS="quiet"
+  case "$MODE" in
+    mutable)      KARGS="root=UUID=$ROOT_UUID ro " ;;
+    stateless)    KARGS="boot=live " ;;
+    persistence)  KARGS="boot=live persistence persistence-label=persistence persistence-storage=filesystem " ;;
+  esac
+
   cat > "$MNT_ROOT/boot/grub/grub.cfg" <<EOF
 set default=0
 set timeout=3
 
-menuentry "MTC Linux" {
+menuentry "MTC Linux ($MODE)" {
     insmod part_gpt
     insmod fat
     insmod ext2
     search --no-floppy --fs-uuid --set=root $ROOT_UUID
-    linux /boot/vmlinuz root=UUID=$ROOT_UUID ro quiet
+    linux /boot/vmlinuz $KARGS
     initrd /boot/initrd
 }
 EOF
@@ -234,3 +322,4 @@ fi
 
 sync
 log "Install complete. Reboot and choose the installed disk in UEFI boot menu if needed."
+

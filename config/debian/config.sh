@@ -23,6 +23,9 @@ PACKAGES=(
   initramfs-tools
   sudo
   openssl
+  live-boot
+  initramfs-tools
+  squashfs-tools
 )
 
 # --- Accounts -------------------------------------------------
