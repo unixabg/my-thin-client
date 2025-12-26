@@ -1,16 +1,15 @@
-\
 #!/usr/bin/env bash
 set -euo pipefail
 
 # Uses: MTC_WORK_DIR
 
 mtc_teardown_mounts() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   # order matters: deepest first
   mtc_umount "${root}/proc"
   mtc_umount "${root}/sys"
   mtc_umount "${root}/dev"
-  mtc_umount "${MTC_WORK_DIR}/squashfs"  # tmpfs, if used
+  mtc_umount "${MTC_WORK_DIR}/chroot"  # tmpfs, if used
 }
 
 mtc_cleanup_workdir() {

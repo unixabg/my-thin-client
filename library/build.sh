@@ -1,4 +1,3 @@
-\
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -22,19 +21,19 @@ mtc_host_arch() {
 }
 
 mtc_prepare_dirs() {
-  mkdir -p "${MTC_WORK_DIR}/output" "${MTC_WORK_DIR}/squashfs"
+  mkdir -p "${MTC_WORK_DIR}/output" "${MTC_WORK_DIR}/chroot"
 }
 
 mtc_maybe_mount_tmpfs() {
   if [[ -n "${MTC_RAMDISK_SIZE:-}" ]]; then
-    mtc_log "Mounting tmpfs (${MTC_RAMDISK_SIZE}) at ${MTC_WORK_DIR}/squashfs"
-    mount -t tmpfs -o "size=${MTC_RAMDISK_SIZE}" tmpfs "${MTC_WORK_DIR}/squashfs"
+    mtc_log "Mounting tmpfs (${MTC_RAMDISK_SIZE}) at ${MTC_WORK_DIR}/chroot"
+    mount -t tmpfs -o "size=${MTC_RAMDISK_SIZE}" tmpfs "${MTC_WORK_DIR}/chroot"
   fi
 }
 
 mtc_write_sources_list() {
   # Debian-style defaults; flavors can override by providing their own /etc/apt/sources.list in chroot overlay.
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   if [[ -f "${root}/etc/apt/sources.list" ]]; then
     mtc_log "sources.list already provided by overlay; leaving as-is."
     return 0
@@ -48,7 +47,7 @@ EOF
 }
 
 mtc_debootstrap() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   local host_arch
   host_arch="$(mtc_host_arch)"
 
@@ -74,7 +73,7 @@ mtc_debootstrap() {
 
 mtc_rsync_chroot_overlay() {
   local src="${CFG_DIR}/chroot"
-  local dst="${MTC_WORK_DIR}/squashfs"
+  local dst="${MTC_WORK_DIR}/chroot"
   if [[ -d "${src}" ]]; then
     mtc_log "Applying chroot overlay: ${src} -> ${dst}"
     rsync -a "${src}/" "${dst}/"
@@ -91,7 +90,7 @@ mtc_rsync_output_overlay() {
 }
 
 mtc_chroot_mounts() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   mkdir -p "${root}/proc" "${root}/sys" "${root}/dev"
   mtc_mountpoint "${root}/proc" || mount -t proc proc "${root}/proc"
   mtc_mountpoint "${root}/sys"  || mount --bind /sys "${root}/sys"
@@ -99,7 +98,7 @@ mtc_chroot_mounts() {
 }
 
 mtc_chroot_umounts() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   mtc_umount "${root}/dev"
   mtc_umount "${root}/sys"
   mtc_umount "${root}/proc"
@@ -107,7 +106,7 @@ mtc_chroot_umounts() {
 
 mtc_drop_to_chroot_shell_if_enabled() {
   [[ "${CHROOT_SHELL:-0}" -eq 1 ]] || return 0
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   mtc_log "Dropping into chroot shell. Exit to resume build."
   mtc_chroot_mounts
   if [[ -x "${root}/bin/bash" ]]; then
@@ -120,7 +119,7 @@ mtc_drop_to_chroot_shell_if_enabled() {
 }
 
 mtc_chroot_provision() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   mtc_log "Provisioning inside chroot (apt-get update/install)"
   mtc_chroot_mounts
 
@@ -159,7 +158,7 @@ mtc_chroot_provision() {
 }
 
 mtc_configure_accounts() {
-  local root="$MTC_WORK_DIR/squashfs"
+  local root="$MTC_WORK_DIR/chroot"
 
   mtc_log "Configuring accounts (root + ${MTC_USER:-})"
 
@@ -199,7 +198,7 @@ EOF
 }
 
 mtc_extract_boot_artifacts() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   local out="${MTC_WORK_DIR}/output"
   local k i
 
@@ -221,12 +220,12 @@ mtc_extract_boot_artifacts() {
 }
 
 mtc_squashfs_cleanup_rootfs() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   rm -rf "${root}/tmp/"* "${root}/var/log/"* "${root}/var/cache/apt/"* "${root}/usr/share/doc/"* 2>/dev/null || true
 }
 
 mtc_make_squashfs() {
-  local root="${MTC_WORK_DIR}/squashfs"
+  local root="${MTC_WORK_DIR}/chroot"
   local out="${MTC_WORK_DIR}/output/filesystem.squashfs"
   mtc_log "Building SquashFS: ${out} (comp=${MTC_SQUASHFS_COMP})"
   mksquashfs "${root}" "${out}" -noappend -comp "${MTC_SQUASHFS_COMP}"
