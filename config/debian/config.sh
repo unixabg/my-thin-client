@@ -95,3 +95,15 @@ MTC_GROUPS="sudo"   # comma-separated, e.g. "sudo,adm"
 # Whether to allow passwordless sudo (0 or 1)
 MTC_SUDO_NOPASSWD=0
 
+# --- build chroot or skip -------------------------------------
+# Whether to (re)build the chroot environment
+# true  = run mtc_build_chroot + mtc_build_output
+# false = assume chroot already exists, run only mtc_build_output
+MTC_BUILD_CHROOT=true
+
+# --- build output or skip -------------------------------------
+# Whether to (re)build the output environment
+# true  = run mtc_build_output
+# false = no build mtc_build_output
+MTC_BUILD_OUTPUT=true
+

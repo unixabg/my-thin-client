@@ -232,7 +232,7 @@ mtc_make_squashfs() {
   mksquashfs "${root}" "${out}" -noappend -comp "${MTC_SQUASHFS_COMP}"
 }
 
-mtc_build_all() {
+mtc_build_chroot() {
   mtc_prepare_dirs
   mtc_maybe_mount_tmpfs
   mtc_debootstrap
@@ -240,6 +240,17 @@ mtc_build_all() {
   mtc_rsync_chroot_overlay
   mtc_drop_to_chroot_shell_if_enabled
   mtc_chroot_provision
+  #mtc_configure_accounts
+  #mtc_extract_boot_artifacts
+  #mtc_squashfs_cleanup_rootfs
+  #mtc_make_squashfs
+  #mtc_rsync_output_overlay
+  #chmod -R a+rX "${MTC_WORK_DIR}/output" || true
+  #mtc_log "Artifacts in: ${MTC_WORK_DIR}/output"
+}
+
+mtc_build_output() {
+  mtc_prepare_dirs
   mtc_configure_accounts
   mtc_extract_boot_artifacts
   mtc_squashfs_cleanup_rootfs

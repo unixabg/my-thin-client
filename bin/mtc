@@ -53,20 +53,33 @@ cleanup_on_exit() {
 }
 trap cleanup_on_exit EXIT INT TERM
 
-# Fresh build each time (safe reruns)
-if [[ -d "${MTC_WORK_DIR}" ]]; then
-  mtc_log "Cleaning previous workdir: ${MTC_WORK_DIR}"
-  mtc_cleanup_workdir
-fi
-mkdir -p "${MTC_WORK_DIR}"
-
 mtc_log "Build start: flavor=${CFG_NAME} arch=${MTC_ARCH} suite=${MTC_SUITE}"
 mtc_log "Workdir: ${MTC_WORK_DIR}"
 
 # Run with full log
 {
   set -x
-  mtc_build_all
+
+  if [[ "${MTC_BUILD_CHROOT}" == "true" ]]; then
+    # Fresh build each time (safe reruns)
+    if [[ -d "${MTC_WORK_DIR}" ]]; then
+      mtc_log "Cleaning previous workdir: ${MTC_WORK_DIR}"
+      mtc_cleanup_workdir
+    fi
+    mkdir -p "${MTC_WORK_DIR}"
+    # build the chroot
+    mtc_build_chroot
+  else
+    echo "Skipping chroot build (MTC_BUILD_CHROOT=false)"
+  fi
+
+  if [[ "${MTC_BUILD_OUTPUT}" == "true" ]]; then
+    # build the output
+    mtc_build_output
+  else
+    echo "Skipping output build (MTC_BUILD_OUTPUT=false)"
+  fi
+
   set +x
 } 2>&1 | tee "${MTC_WORK_DIR}/build.log"
 
