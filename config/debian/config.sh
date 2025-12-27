@@ -14,6 +14,38 @@ MTC_RAMDISK_SIZE=""   # e.g. "6G" to build rootfs on tmpfs
 # Set to 1 to drop into an interactive chroot shell and PAUSE the build until you exit.
 CHROOT_SHELL=0
 
+# --- Accounts -------------------------------------------------
+
+# Root password (leave empty to keep root locked)
+ROOT_PASSWORD="rootpass"
+
+# Create an MTC user
+MTC_USER="mtc"
+MTC_PASSWORD="mtcpass"
+MTC_UID=""          # optional (empty = auto)
+MTC_SHELL="/bin/bash"
+MTC_GROUPS="sudo"   # comma-separated, e.g. "sudo,adm"
+
+# Whether to allow passwordless sudo (0 or 1)
+MTC_SUDO_NOPASSWD=0
+
+# Set to 1 to enable dropbear remote unlock
+MTC_REMOTE_UNLOCK=0
+MTC_DROPBEAR_PORT=2222
+MTC_AUTHORIZED_KEYS_FILE="${HOME}/mtc-remote-unlock-key.pub"
+
+# --- build chroot or skip -------------------------------------
+# Whether to (re)build the chroot environment
+# 1 = run mtc_build_chroot + mtc_build_output
+# 0 = assume chroot already exists, run only mtc_build_output
+MTC_BUILD_CHROOT=1
+
+# --- build output or skip -------------------------------------
+# Whether to (re)build the output environment
+# 1 = run mtc_build_output
+# 0 = no build mtc_build_output
+MTC_BUILD_OUTPUT=1
+
 # Packages installed inside the chroot (after apt-get update).
 PACKAGES=(
   ca-certificates
@@ -30,6 +62,7 @@ PACKAGES=(
   cryptsetup-initramfs
   busybox
   console-setup
+  dropbear-initramfs
 
   # Display manager (lightweight)
   xserver-xorg
@@ -80,30 +113,4 @@ PACKAGES=(
   fonts-liberation
 )
 
-# --- Accounts -------------------------------------------------
-
-# Root password (leave empty to keep root locked)
-ROOT_PASSWORD="rootpass"
-
-# Create an MTC user
-MTC_USER="mtc"
-MTC_PASSWORD="mtcpass"
-MTC_UID=""          # optional (empty = auto)
-MTC_SHELL="/bin/bash"
-MTC_GROUPS="sudo"   # comma-separated, e.g. "sudo,adm"
-
-# Whether to allow passwordless sudo (0 or 1)
-MTC_SUDO_NOPASSWD=0
-
-# --- build chroot or skip -------------------------------------
-# Whether to (re)build the chroot environment
-# true  = run mtc_build_chroot + mtc_build_output
-# false = assume chroot already exists, run only mtc_build_output
-MTC_BUILD_CHROOT=true
-
-# --- build output or skip -------------------------------------
-# Whether to (re)build the output environment
-# true  = run mtc_build_output
-# false = no build mtc_build_output
-MTC_BUILD_OUTPUT=true
 

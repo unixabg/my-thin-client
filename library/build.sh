@@ -50,13 +50,19 @@ mtc_debootstrap() {
   local root="${MTC_WORK_DIR}/chroot"
   local host_arch
   host_arch="$(mtc_host_arch)"
+  if [[ ! -d "${CFG_DIR}/cache" ]]; then
+    mtc_log "No cache directory found making ${CFG_DIR}/cache"
+    mkdir "${CFG_DIR}/cache"
+  else
+    mtc_log "Using cache directory of ${CFG_DIR}/cache"
+  fi
 
   mtc_log "Running debootstrap: suite=${MTC_SUITE} arch=${MTC_ARCH} mirror=${MTC_MIRROR}"
   if [[ "${MTC_ARCH}" == "${host_arch}" ]]; then
-    debootstrap --arch="${MTC_ARCH}" "${MTC_SUITE}" "${root}" "${MTC_MIRROR}"
+    debootstrap --cache-dir="${CFG_DIR}/cache" --arch="${MTC_ARCH}" "${MTC_SUITE}" "${root}" "${MTC_MIRROR}"
   else
     # foreign bootstrap
-    debootstrap --arch="${MTC_ARCH}" --foreign "${MTC_SUITE}" "${root}" "${MTC_MIRROR}"
+    debootstrap --cache-dir="${CFG_DIR}/cache" --arch="${MTC_ARCH}" --foreign "${MTC_SUITE}" "${root}" "${MTC_MIRROR}"
     # copy qemu for second stage
     if command -v qemu-"${MTC_ARCH}"-static >/dev/null 2>&1; then
       cp "$(command -v qemu-"${MTC_ARCH}"-static)" "${root}/usr/bin/" || true
@@ -110,9 +116,9 @@ mtc_drop_to_chroot_shell_if_enabled() {
   mtc_log "Dropping into chroot shell. Exit to resume build."
   mtc_chroot_mounts
   if [[ -x "${root}/bin/bash" ]]; then
-    chroot "${root}" /bin/bash -l
+    chroot "${root}" /bin/bash -il
   else
-    chroot "${root}" /bin/sh -l
+    chroot "${root}" /bin/sh -il
   fi
   mtc_log "Chroot shell exited; resuming."
   mtc_chroot_umounts
@@ -231,6 +237,80 @@ mtc_make_squashfs() {
   mksquashfs "${root}" "${out}" -noappend -comp "${MTC_SQUASHFS_COMP}"
 }
 
+mtc_initramfs_dropbear_hostkeys_generate() {
+  [[ "${MTC_REMOTE_UNLOCK:-0}" -eq 1 ]] || return 0
+
+  local root="${MTC_WORK_DIR}/chroot"
+  mtc_log "Generating fresh dropbear initramfs host keys"
+
+  mkdir -p "${root}/etc/dropbear/initramfs"
+  chmod 700 "${root}/etc/dropbear/initramfs"
+
+  # wipe any existing keys to guarantee uniqueness per build
+  rm -f "${root}/etc/dropbear/initramfs"/dropbear_*_host_key
+
+  mtc_chroot_mounts
+  # generate keys inside chroot (dropbearkey comes with dropbear binaries)
+  chroot "${root}" /usr/bin/env bash -lc \
+    'set -e; dropbearkey -t ed25519 -f /etc/dropbear/initramfs/dropbear_ed25519_host_key >/dev/null;
+            dropbearkey -t rsa -s 4096 -f /etc/dropbear/initramfs/dropbear_rsa_host_key >/dev/null;
+            chmod 600 /etc/dropbear/initramfs/dropbear_*_host_key'
+  mtc_chroot_umounts
+}
+
+mtc_initramfs_remote_unlock_configure() {
+  [[ "${MTC_REMOTE_UNLOCK:-0}" -eq 1 ]] || return 0
+
+  local root="${MTC_WORK_DIR}/chroot"
+
+  [[ -n "${MTC_AUTHORIZED_KEYS_FILE:-}" && -f "${MTC_AUTHORIZED_KEYS_FILE}" ]] || \
+    mtc_die "MTC_REMOTE_UNLOCK=1 requires MTC_AUTHORIZED_KEYS_FILE=/path/to/authorized_keys (or .pub)"
+
+  mtc_log "Configuring dropbear-initramfs remote unlock (port=${MTC_DROPBEAR_PORT})"
+
+  mkdir -p "${root}/etc/dropbear/initramfs"
+  chmod 700 "${root}/etc/dropbear/initramfs"
+  install -m 600 "${MTC_AUTHORIZED_KEYS_FILE}" \
+    "${root}/etc/dropbear/initramfs/authorized_keys"
+
+  cat > "${root}/etc/dropbear/initramfs/dropbear.conf" <<EOF
+DROPBEAR_OPTIONS="-p ${MTC_DROPBEAR_PORT} -s -j -k -I 60"
+EOF
+  chmod 600 "${root}/etc/dropbear/initramfs/dropbear.conf"
+
+  # allow initramfs networking (kernel cmdline still should include ip=dhcp)
+  mkdir -p "${root}/etc/initramfs-tools"
+  if [[ -f "${root}/etc/initramfs-tools/initramfs.conf" ]]; then
+    if grep -q '^IP=' "${root}/etc/initramfs-tools/initramfs.conf"; then
+      sed -i 's/^IP=.*/IP=dhcp/' "${root}/etc/initramfs-tools/initramfs.conf"
+    else
+      echo "IP=dhcp" >> "${root}/etc/initramfs-tools/initramfs.conf"
+    fi
+  else
+    echo "IP=dhcp" > "${root}/etc/initramfs-tools/initramfs.conf"
+  fi
+}
+
+mtc_chroot_update_initramfs() {
+  local root="${MTC_WORK_DIR}/chroot"
+  mtc_log "Regenerating initramfs inside chroot"
+  mtc_chroot_mounts
+  chroot "${root}" /usr/bin/env bash -lc 'update-initramfs -u'
+  mtc_chroot_umounts
+}
+
+mtc_enable_remote_unlock() {
+  [[ "${MTC_REMOTE_UNLOCK}" -eq 1 ]] || return 0
+
+  # If remote unlock is enabled, require a key file
+  [[ -n "${MTC_AUTHORIZED_KEYS_FILE}" && -f "${MTC_AUTHORIZED_KEYS_FILE}" ]] || \
+    mtc_die "MTC_REMOTE_UNLOCK=1 requires MTC_AUTHORIZED_KEYS_FILE=/path/to/authorized_keys (or .pub)"
+
+  mtc_initramfs_dropbear_hostkeys_generate
+  mtc_initramfs_remote_unlock_configure
+  mtc_chroot_update_initramfs
+}
+
 mtc_build_chroot() {
   mtc_prepare_dirs
   mtc_maybe_mount_tmpfs
@@ -239,6 +319,7 @@ mtc_build_chroot() {
   mtc_rsync_chroot_overlay
   mtc_drop_to_chroot_shell_if_enabled
   mtc_chroot_provision
+  mtc_enable_remote_unlock
   #mtc_configure_accounts
   #mtc_extract_boot_artifacts
   #mtc_squashfs_cleanup_rootfs
