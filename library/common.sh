@@ -11,6 +11,15 @@ mtc_require_root() {
   fi
 }
 
+mtc_setup_logging() {
+  [[ "${MTC_LOGGING_SETUP:-0}" -eq 1 ]] && return 0
+  : "${MTC_WORK_DIR:?MTC_WORK_DIR not set}"
+  mkdir -p "$MTC_WORK_DIR"
+  local log_file="${MTC_WORK_DIR}/build.log"
+  export MTC_LOGGING_SETUP=1
+  exec > >(tee -a "$log_file") 2>&1
+}
+
 mtc_mountpoint() { mountpoint -q "$1"; }
 
 # Safe unmount: works even if not mounted.

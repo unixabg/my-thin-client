@@ -71,6 +71,8 @@ mtc_log "Workdir: ${MTC_WORK_DIR}"
       mtc_cleanup_workdir
     fi
     mkdir -p "${MTC_WORK_DIR}"
+    # setup the build log
+    mtc_setup_logging
     # build the chroot
     mtc_build_chroot
   else
@@ -78,6 +80,8 @@ mtc_log "Workdir: ${MTC_WORK_DIR}"
   fi
 
   if [[ "${MTC_BUILD_OUTPUT}" -eq 1 ]]; then
+    # setup the build log
+    mtc_setup_logging
     # build the output
     mtc_build_output
   else
