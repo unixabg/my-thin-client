@@ -63,14 +63,15 @@ PACKAGES=(
   busybox
   console-setup
   dropbear-initramfs
+  openssh-server
 
   # Display manager (lightweight)
   xserver-xorg
   lightdm
   lightdm-gtk-greeter
 
-  # XFCE desktop (core + goodies)
-  xfce4
+  # XFCE desktop
+  task-xfce-desktop
   xfce4-goodies
   chromium
 
